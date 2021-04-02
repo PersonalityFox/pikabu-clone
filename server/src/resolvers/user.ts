@@ -1,8 +1,8 @@
 import { MyContext } from "../types";
-import { Resolver, Mutation, Arg, InputType, Field, Ctx, ObjectType } from "type-graphql";
+import { Resolver, Mutation, Arg, InputType, Field, Ctx, ObjectType, Query } from "type-graphql";
 import argon2 from 'argon2';
 import { User } from "../entities/User";
-import { ifError } from "node:assert";
+import {EntityManager} from "@mikro-orm/postgresql"
 
 @InputType()
 class UsernamePasswordInput {
@@ -32,10 +32,22 @@ class UserResponse {
 
 @Resolver()
 export class UserResolver{
+    @Query(() => User, {nullable: true})
+    async me(
+        @Ctx() {req,em}: MyContext ) {
+        // you are not logged in
+        if (!req.session.userId) {
+            return null
+        };
+
+        const user = await em.findOne(User, {id: req.session.userId})
+        return user;
+    }
+
     @Mutation(() => UserResponse)
     async register(
         @Arg('options') options: UsernamePasswordInput,
-        @Ctx() {em}: MyContext
+        @Ctx() {em, req}: MyContext
     ) : Promise<UserResponse> {
         if (options.username.length <= 2){
             return {
@@ -45,23 +57,25 @@ export class UserResolver{
                 },],
             }
         }
-        if (options.password.length <= 3){
+        if (options.password.length <= 2){
             return {
                 errors: [{
                     field:'password',
-                    message:'lenght must be greater than 3',
+                    message:'lenght must be greater than 2',
                 },],
             }
         }
 
         const hashedPassword = await argon2.hash(options.password);
-        const user = em.create(User, {
-            username: options.username, 
-            password: hashedPassword
-        });
-
+        let user;
         try{
-            await em.persistAndFlush(user)
+            const result= await (em as EntityManager).createQueryBuilder(User).getKnexQuery().insert({
+                username: options.username, 
+                password: hashedPassword,
+                created_at: new Date(),
+                updated_at: new Date()
+            }).returning("*");
+            user = result[0];
         } catch(err){
             console.log(err);
             if (err.code === '23505' || err.detail.includes("already exist")){
@@ -75,6 +89,9 @@ export class UserResolver{
             }
             
         }
+        
+        // auto login after register
+        req.session.userId = user.id;
         
         return {user}
     }
@@ -106,7 +123,6 @@ export class UserResolver{
         }
 
         req.session!.userId = user.id;
-
 
         return {
             user
